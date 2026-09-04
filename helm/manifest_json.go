@@ -80,16 +80,45 @@ func hashSensitiveValue(v string) string {
 	return fmt.Sprintf("(sensitive value %x)", hash)
 }
 
-// redactSensitiveValues removes values that appear in `set_sensitive` blocks from the manifest JSON
-func redactSensitiveValues(text string, sensitiveValues map[string]string) string {
+// redactSensitiveValues replaces every occurrence of a set_sensitive value in
+// text with a stable hash, so a manifest stored in state or plan output never
+// contains a value the caller marked sensitive.
+//
+// Empty strings are skipped: strings.ReplaceAll(text, "", marker) matches
+// every position and would corrupt the manifest. sensitiveSetValues already
+// filters these out; this is a second guard.
+func redactSensitiveValues(text string, sensitiveValues []string) string {
 	masked := text
 
-	for originalValue := range sensitiveValues {
-		hashedValue := hashSensitiveValue(originalValue)
-		masked = strings.ReplaceAll(masked, originalValue, hashedValue)
+	for _, value := range sensitiveValues {
+		if value == "" {
+			continue
+		}
+
+		// text is always JSON (produced by json.Marshal), so a value with a
+		// character JSON escapes never appears as raw bytes. Search for the
+		// escaped form instead (quotes, backslashes, newlines, and so on).
+		escaped, ok := jsonEscapedForm(value)
+		if !ok || escaped == "" {
+			continue
+		}
+		masked = strings.ReplaceAll(masked, escaped, hashSensitiveValue(value))
 	}
 
 	return masked
+}
+
+// jsonEscapedForm returns value as it appears inside a JSON string field —
+// json.Marshal's quoted encoding with the surrounding quotes stripped.
+func jsonEscapedForm(value string) (string, bool) {
+	b, err := json.Marshal(value)
+	if err != nil {
+		return "", false
+	}
+	if len(b) < 2 || b[0] != '"' || b[len(b)-1] != '"' {
+		return "", false
+	}
+	return string(b[1 : len(b)-1]), true
 }
 
 func redactSecretData(secret *corev1.Secret) {

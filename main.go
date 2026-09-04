@@ -29,7 +29,8 @@ func main() {
 	}
 
 	opts := providerserver.ServeOpts{
-		Address:         "registry.terraform.io/hashicorp/helm",
+		// Must match required_providers.source in consumers (lightdash TFC workspace).
+		Address:         "app.terraform.io/doppel/helm",
 		Debug:           debug,
 		ProtocolVersion: 6,
 	}

@@ -2859,7 +2859,7 @@ func getReleaseJSONResourcesPF(t *testing.T, namespace, name string) map[string]
 	}
 
 	ctx := context.Background()
-	result, diags := mapRuntimeObjects(ctx, kc, objects)
+	result, diags := mapRuntimeObjects(ctx, kc, objects, nil)
 	if diags.HasError() {
 		t.Fatalf("failed to map runtime objects: %v", diags)
 	}
@@ -3001,4 +3001,167 @@ func checkDeploymentReplicasAndGeneration(resourceName, namespace, deploymentNam
 		}
 		return nil
 	}
+}
+
+func TestAccResourceRelease_manifestRedactsSetSensitive(t *testing.T) {
+	namespace := createRandomNamespace(t)
+	defer deleteNamespace(t, namespace)
+	name := randName("redact")
+
+	const secretValue = "correct-horse-battery-staple-canary"
+
+	resource.Test(t, resource.TestCase{
+		ProtoV6ProviderFactories: protoV6ProviderFactories(),
+		Steps: []resource.TestStep{
+			{
+				Config: testAccHelmReleaseConfigSetSensitiveManifest(testResourceName, namespace, name, secretValue),
+				Check: resource.ComposeAggregateTestCheckFunc(
+					resource.TestCheckResourceAttrSet("helm_release.test", "manifest"),
+					func(s *terraform.State) error {
+						res := s.RootModule().Resources["helm_release.test"]
+						if res == nil || res.Primary == nil {
+							return fmt.Errorf("helm_release.test not found in state")
+						}
+
+						foundMarker := false
+						for key, value := range res.Primary.Attributes {
+							if key != "manifest" && !strings.HasPrefix(key, "resources.") {
+								continue
+							}
+							if strings.Contains(value, secretValue) {
+								return fmt.Errorf("set_sensitive value leaked into computed attribute %q verbatim: %s", key, value)
+							}
+							if strings.Contains(value, "(sensitive value") {
+								foundMarker = true
+							}
+						}
+						if !foundMarker {
+							return fmt.Errorf("expected the redaction hash marker in manifest or resources[...]")
+						}
+						return nil
+					},
+				),
+			},
+		},
+	})
+}
+
+func TestAccResourceRelease_manifestRedactsQuoteContainingSetSensitive(t *testing.T) {
+	namespace := createRandomNamespace(t)
+	defer deleteNamespace(t, namespace)
+	name := randName("redact-esc")
+
+	const secretValue = `canary-with-a-"quoted-phrase"-inside-it`
+
+	resource.Test(t, resource.TestCase{
+		ProtoV6ProviderFactories: protoV6ProviderFactories(),
+		Steps: []resource.TestStep{
+			{
+				Config: testAccHelmReleaseConfigSetSensitiveManifest(testResourceName, namespace, name, secretValue),
+				Check: resource.ComposeAggregateTestCheckFunc(
+					resource.TestCheckResourceAttrSet("helm_release.test", "manifest"),
+					func(s *terraform.State) error {
+						res := s.RootModule().Resources["helm_release.test"]
+						if res == nil || res.Primary == nil {
+							return fmt.Errorf("helm_release.test not found in state")
+						}
+
+						foundMarker := false
+						for key, value := range res.Primary.Attributes {
+							if key != "manifest" && !strings.HasPrefix(key, "resources.") {
+								continue
+							}
+							if strings.Contains(value, "canary-with-a") {
+								return fmt.Errorf("quote-containing set_sensitive value leaked into computed attribute %q, readable: %s", key, value)
+							}
+							if strings.Contains(value, "(sensitive value") {
+								foundMarker = true
+							}
+						}
+						if !foundMarker {
+							return fmt.Errorf("expected the redaction hash marker in manifest or resources[...]")
+						}
+						return nil
+					},
+				),
+			},
+		},
+	})
+}
+
+func testAccHelmReleaseConfigSetSensitiveManifest(resource, ns, name, secretValue string) string {
+	return fmt.Sprintf(`
+		provider helm {
+			experiments = {
+				manifest = true
+			}
+		}
+
+		resource "helm_release" "%s" {
+			name        = %q
+			namespace   = %q
+			repository  = %q
+			version     = %q
+			chart       = "test-chart"
+
+			set_sensitive = [
+				{
+					name  = "podAnnotations.canary"
+					value = %q
+				}
+			]
+		}
+	`, resource, name, ns, testRepositoryURL, "1.2.3", secretValue)
+}
+
+func TestAccResourceRelease_ownershipMetadataLocalChart(t *testing.T) {
+	namespace := createRandomNamespace(t)
+	defer deleteNamespace(t, namespace)
+	name := randName("bare-metadata")
+
+	resource.Test(t, resource.TestCase{
+		ProtoV6ProviderFactories: protoV6ProviderFactories(),
+		Steps: []resource.TestStep{
+			{
+				Config: testAccHelmReleaseConfigBareMetadata(testResourceName, namespace, name),
+				Check: resource.ComposeAggregateTestCheckFunc(
+					func(s *terraform.State) error {
+						res := s.RootModule().Resources["helm_release.test"]
+						if res == nil || res.Primary == nil {
+							return fmt.Errorf("helm_release.test not found in state")
+						}
+						for key, value := range res.Primary.Attributes {
+							if strings.HasPrefix(key, "resources.") && strings.Contains(key, "configmap") {
+								if !strings.Contains(value, `"app.kubernetes.io/managed-by":"Helm"`) {
+									return fmt.Errorf("resources[%s] is missing the Helm-injected managed-by label: %s", key, value)
+								}
+								return nil
+							}
+						}
+						return fmt.Errorf("no configmap found under resources[...] to check")
+					},
+				),
+			},
+			{
+				Config: testAccHelmReleaseConfigBareMetadata(testResourceName, namespace, name),
+				Check:  resource.TestCheckResourceAttrSet("helm_release.test", "manifest"),
+			},
+		},
+	})
+}
+
+func testAccHelmReleaseConfigBareMetadata(resource, ns, name string) string {
+	return fmt.Sprintf(`
+		provider helm {
+			experiments = {
+				manifest = true
+			}
+		}
+
+		resource "helm_release" "%s" {
+			name      = %q
+			namespace = %q
+			chart     = "./testdata/charts/bare-metadata"
+		}
+	`, resource, name, ns)
 }

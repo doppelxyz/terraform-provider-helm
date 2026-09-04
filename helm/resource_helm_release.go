@@ -1714,11 +1714,11 @@ func setReleaseAttributes(ctx context.Context, state *HelmReleaseModel, identity
 			)
 			return diags
 		}
-		sensitiveValues := extractSensitiveValues(state)
+		sensitiveValues := sensitiveSetValues(ctx, state.SetSensitive)
 		manifest := redactSensitiveValues(string(jsonManifest), sensitiveValues)
 		state.Manifest = types.StringValue(manifest)
 
-		resources, resDiags := getLiveResources(ctx, r, meta)
+		resources, resDiags := getLiveResources(ctx, r, meta, sensitiveValues)
 		diags.Append(resDiags...)
 
 		if !resDiags.HasError() {
@@ -1798,22 +1798,26 @@ func metadataAttrTypes() map[string]attr.Type {
 	}
 }
 
-func extractSensitiveValues(state *HelmReleaseModel) map[string]string {
-	sensitiveValues := make(map[string]string)
-
-	if !state.SetSensitive.IsNull() {
-		var setSensitiveList []setResourceModel
-		diags := state.SetSensitive.ElementsAs(context.Background(), &setSensitiveList, false)
-		if diags.HasError() {
-			return sensitiveValues
-		}
-
-		for _, set := range setSensitiveList {
-			sensitiveValues[set.Name.ValueString()] = "(sensitive value)"
-		}
+func sensitiveSetValues(ctx context.Context, setSensitive types.List) []string {
+	if setSensitive.IsNull() || setSensitive.IsUnknown() {
+		return nil
 	}
 
-	return sensitiveValues
+	var list []setResourceModel
+	if diags := setSensitive.ElementsAs(ctx, &list, false); diags.HasError() {
+		return nil
+	}
+
+	values := make([]string, 0, len(list))
+	for _, set := range list {
+		if set.Value.IsNull() || set.Value.IsUnknown() {
+			continue
+		}
+		if v := set.Value.ValueString(); v != "" {
+			values = append(values, v)
+		}
+	}
+	return values
 }
 
 func (m *Meta) ExperimentEnabled(name string) bool {
@@ -2104,22 +2108,10 @@ func (r *HelmRelease) ModifyPlan(ctx context.Context, req resource.ModifyPlanReq
 				resp.Diagnostics.AddError("Error converting YAML manifest to JSON", err.Error())
 				return
 			}
-			valuesMap := make(map[string]string)
-			if !plan.SetSensitive.IsNull() {
-				var setSensitiveList []setResourceModel
-				setSensitiveDiags := plan.SetSensitive.ElementsAs(ctx, &setSensitiveList, false)
-				resp.Diagnostics.Append(setSensitiveDiags...)
-				if resp.Diagnostics.HasError() {
-					return
-				}
-
-				for _, set := range setSensitiveList {
-					valuesMap[set.Name.ValueString()] = set.Value.ValueString()
-				}
-			}
+			valuesMap := sensitiveSetValues(ctx, plan.SetSensitive)
 			manifest := redactSensitiveValues(string(jsonManifest), valuesMap)
 			plan.Manifest = types.StringValue(manifest)
-			resources, resDiags := getDryRunResources(ctx, dry, meta)
+			resources, resDiags := getDryRunResources(ctx, dry, meta, valuesMap)
 			resp.Diagnostics.Append(resDiags...)
 			if resp.Diagnostics.HasError() {
 				return
@@ -2192,22 +2184,10 @@ func (r *HelmRelease) ModifyPlan(ctx context.Context, req resource.ModifyPlanReq
 			resp.Diagnostics.AddError("Error converting YAML manifest to JSON", err.Error())
 			return
 		}
-		valuesMap := make(map[string]string)
-		if !plan.SetSensitive.IsNull() {
-			var setSensitiveList []setResourceModel
-			setSensitiveDiags := plan.SetSensitive.ElementsAs(ctx, &setSensitiveList, false)
-			resp.Diagnostics.Append(setSensitiveDiags...)
-			if resp.Diagnostics.HasError() {
-				return
-			}
-
-			for _, set := range setSensitiveList {
-				valuesMap[set.Name.ValueString()] = set.Value.ValueString()
-			}
-		}
+		valuesMap := sensitiveSetValues(ctx, plan.SetSensitive)
 		manifest := redactSensitiveValues(string(jsonManifest), valuesMap)
 		plan.Manifest = types.StringValue(manifest)
-		resources, resDiags := getDryRunResources(ctx, dry, meta)
+		resources, resDiags := getDryRunResources(ctx, dry, meta, valuesMap)
 		resp.Diagnostics.Append(resDiags...)
 		if resp.Diagnostics.HasError() {
 			return
